@@ -1,0 +1,1186 @@
+---
+title: "A Business Cycle Investment Strategy"
+author: "Tim Jacobs"
+date: '`r Sys.Date()`'
+output:
+  bookdown::pdf_book: default
+  bookdown::gitbook: default
+site: bookdown::bookdown_site
+documentclass: book
+---
+
+
+```{r libraryOpts, echo=FALSE, message=FALSE, warning=FALSE}
+library("knitr")
+library("ggplot2")
+library("scales")
+library("ggalt")
+library("tidyquant")
+library("reshape2")
+library("png")
+library("readxl")
+
+opts_chunk$set(warning=FALSE,
+              message=FALSE,
+              echo = FALSE)
+
+quandlKey <- "vQwvpzts4Y8Z8bt3nsjc"
+quandl_api_key(quandlKey)
+```
+
+
+```{r utilFuncs}
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+
+range01 <- function(x, ...){
+  (x - min(x, ...)) / (max(x, ...) - min(x, ...))
+}
+```
+
+
+# Introduction
+The business cycle is the fluctuation in economic activity that an economy experiences over a period of time. A business cycle is basically defined in terms of periods of expansion or recession. During expansions, the economy is growing in real terms (i.e. excluding inflation), as evidenced by increases in indicators like employment, industrial production, sales and personal incomes. During recessions, the economy is contracting, as measured by decreases in the above indicators. Expansion is measured from the trough (or bottom) of the previous business cycle to the peak of the current cycle, while recession is measured from the peak to the trough. In the United States, the National Bureau of Economic Research (NBER) determines the official dates for business cycles[^INVEST_BC].
+
+[^INVEST_BC]: investopedia, http://www.investopedia.com/terms/b/businesscycle.asp
+
+This document characterizes the history of business cycles in the United States and characterizes how various markets are affected by these business cycles. The source of much of the data in this document is the Federal Reserve Economic Data web site. Some of the forecasting data comes from Quandl. An investment allocation strategy that exploits the behavior of the different markets in the expansion and contraction phases of a business cycle is explored.
+
+
+#### FRED Data
+The Federal Reserve Economic Data [web site](https://fred.stlouisfed.org/) (FRED) makes available many different time series data sets on a wide range of topics related to economics. These time series can be downloaded using functions from the `tidyquant` package. In this paper data sets from the [Business Cycle Expansions & Contractons](https://fred.stlouisfed.org/categories/32262) category of the [Production & Business Activity](https://fred.stlouisfed.org/categories/1) section of the web site are used in the presentation of recessions, and data sets from the [Financial Indicators](https://fred.stlouisfed.org/categories/46) category of the [Money, Banking, & Finance](https://fred.stlouisfed.org/categories/32991) section of the web site were used in the presentation of the equity and bond market performance.
+
+```{r getFRED, cache = TRUE}
+today <- Sys.Date()
+
+#################
+#
+# Recession Data
+#
+################
+# GDP-based recession indicator
+gdpIdx <- tq_get("JHGDPBRINDX", get = "economic.data",
+                 from = "1855-01-01", to = today)
+gdpIdx$indicator <- "GDP.Index"
+colnames(gdpIdx) <- c("date", "probability", "indicator")
+
+gdpIdxDates <- tq_get("JHDUSRGDPBR", get = "economic.data",
+                 from = "1855-01-01", to = today)
+gdpIdxDates$indicator <- "GDP.Dates"
+colnames(gdpIdxDates) <- c("date", "recession", "indicator")
+
+
+# moothed U.S. Recession Probabilities
+smoothedRecessionProb <- tq_get("RECPROUSM156N", get = "economic.data",
+                                from = "1855-01-01", to = today)
+smoothedRecessionProb$indicator <- "Probability"
+colnames(smoothedRecessionProb) <- c("date", "probability", "indicator")
+smoothedRecessionProb$probability <- smoothedRecessionProb$probability/100
+smoothedRecessionProb$recession <- 0
+smoothedRecessionProb[which(smoothedRecessionProb$probability >=0.25),]$recession <- 1
+
+
+# NBER Recession indicators
+nberIdx <- tq_get("USREC", get = "economic.data",
+                  from = "1855-01-01", to = today)
+nberIdx$indicator <- "NBER"
+colnames(nberIdx) <- c("date", "recession", "indicator")
+
+
+# FRED Leading Index
+fredLi <- tq_get("USSLIND", get = "economic.data",
+                  from = "1855-01-01", to = today)
+fredLi$indicator <- "FRED.LI"
+
+
+#################
+#
+# US Market Index Data
+#
+################
+# Wilshire 5000 total market full cap index
+wilshire5000 <- tq_get("WILL5000INDFC", get = "economic.data",
+                  from = "1855-01-01", to = today)
+# Add Monthly Return
+wilshire5000MonthlyReturns <- wilshire5000 %>%
+  tq_transmute(select = price, 
+               mutate_fun = periodReturn, 
+               period = "monthly", 
+               type = "arithmetic")
+
+wilshire5000$index <- "Wilshire 5000"
+wilshire5000MonthlyReturns$index <- "Wilshire 5000"
+
+# Calculate Growth
+wilshire5000GowthMonthly <- wilshire5000MonthlyReturns %>%
+  tq_portfolio(assets_col   = index, 
+               returns_col  = monthly.returns, 
+               col_rename   = "investment.growth",
+               wealth.index = TRUE)
+wilshire5000 <- wilshire5000[complete.cases(wilshire5000),]
+wilshire5000 <- wilshire5000[wilshire5000$date >= as.Date("1979-11-30"),]
+
+# S&P 500 index
+SandP500 <- tq_get("SP500", get = "economic.data",
+                  from = "1855-01-01", to = today)
+SandP500$index <- "S&P 500"
+SandP500 <- SandP500[complete.cases(SandP500),]
+
+# Nasdaq index
+Nasdaq <- tq_get("NASDAQCOM", get = "economic.data",
+                 from = "1855-01-01", to = today)
+Nasdaq$index <- "Nasdaq"
+Nasdaq <- Nasdaq[complete.cases(Nasdaq),]
+
+# Russell 2000 index
+Russell2000 <- tq_get("RU2000TR", get = "economic.data",
+                      from = "1855-01-01", to = today)
+Russell2000$index <- "Russell 2000"
+Russell2000 <- Russell2000[complete.cases(Russell2000),]
+
+
+#################
+#
+# Financial Stress Data
+#
+################
+finStress <- tq_get("STLFSI", get = "economic.data",
+                    from = "1855-01-01", to = today)
+finStress <- finStress[complete.cases(finStress),]
+
+
+#################
+#
+# US Bond Data
+#
+################
+# BofA Merrill Lynch US Corp Master Total Return Index Value
+bOfAUsTotal<- tq_get("BAMLCC0A0CMTRIV", get = "economic.data",
+                         from = "1855-01-01", to = today)
+# Add monthly return
+bOfAUsTotalMonthlyReturn <- bOfAUsTotal %>%
+  tq_transmute(select = price,
+               mutate_fun = periodReturn,
+               period = "monthly",
+               type = "arithmetic")
+
+bOfAUsTotal$index <- "BofA US Total Return"
+bOfAUsTotal <- bOfAUsTotal[complete.cases(bOfAUsTotal),]
+
+# BofA Merrill Lynch US Corp 1-3yr Total Return Index Value
+bOfAUs1to3Year <- tq_get("BAMLCC1A013YTRIV", get = "economic.data",
+                         from = "1855-01-01", to = today)
+bOfAUs1to3Year$index <- "BofA US 1 to 3"
+bOfAUs1to3Year <- bOfAUs1to3Year[complete.cases(bOfAUs1to3Year),]
+
+# BofA Merrill Lynch US Corp AAA Total Return Index Value
+bOfAUsAAA <- tq_get("BAMLCC0A1AAATRIV", get = "economic.data",
+                    from = "1855-01-01", to = today)
+bOfAUsAAA$index <- "BofA US AAA"
+bOfAUsAAA <- bOfAUsAAA[complete.cases(bOfAUsAAA),]
+
+
+#################
+#
+# Emerging Markets Bond Data
+#
+################
+# BofA Merrill Lynch Public Sector Issuers US Emerging Markets
+# Liquid Corporate Plus Sub-Index Total Return Index Value
+bOfAEmMarkets <- tq_get("BAMLEMPUPUBSLCRPIUSTRIV", get = "economic.data",
+                        from = "1855-01-01", to = today)
+bOfAEmMarkets <- bOfAEmMarkets[complete.cases(bOfAEmMarkets),]
+
+# BofA Merrill Lynch AAA-A Emerging Markets Corporate Plus Sub-Index Total Return Index Value
+bOfAEmMarketsAAA <- tq_get("BAMLEM1BRRAAA2ACRPITRIV", get = "economic.data",
+                           from = "1855-01-01", to = today)
+bOfAEmMarketsAAA <- bOfAEmMarketsAAA[complete.cases(bOfAEmMarketsAAA),]
+```
+
+
+
+#### Quandl Data
+[Quandl](https://www.quandl.com/) makes available financial, economic, and alternative data sets for investment professionals. This paper makes use of the Economic Cycle Research Institute's US weekly leading index to explore its usefulness as a recession indication in the portfolio allocation strategy.
+
+```{r getQuandl, cache = TRUE}
+# ECRI Weekly Leading Index
+ecriLi <- tq_get("ECRI/USLEADING",
+                 get = "quandl",
+                 from = "1855-01-01", to = today)
+ecriLi$indicator <- "ECRI.LI"
+ecriLi <- ecriLi[complete.cases(ecriLi),]
+
+# ECRI Coincedent Index
+ecriCi <- tq_get("ECRI/USCOIN",
+                 get = "quandl",
+                 from = "1855-01-01", to = today)
+ecriCi$indicator <- "ECRI.CI"
+ecriCi <- ecriCi[complete.cases(ecriCi),]
+```
+
+
+
+# Business Cycles
+
+
+## NBER Declared Business Cycle Periods
+
+```{r makeRecessionDf}
+# Find beginning and end of recession periods
+nberIdxRunLength <- rle(nberIdx$recession)
+cs <- cumsum(nberIdxRunLength[[1]])
+begin <- nberIdx$date[cs[nberIdxRunLength[[2]] == 0]]
+begin <- begin[!is.na(begin)]
+begin <- begin[1:(length(begin)-1)]
+end <- nberIdx$date[cs[nberIdxRunLength[[2]] == 1]]
+
+recessions <- data.frame(begin = begin, end = end)
+
+# Add recession length
+recessions$weeks <- difftime(recessions$end, recessions$begin, units = "weeks")
+
+# Add time to next recession
+recessions$nxtRecession <- round(difftime(c(recessions$begin[2:(nrow(recessions))], NA),
+                                          recessions$begin, units = "weeks"))
+
+medianRecessionLength <- median(recessions$weeks)
+meanRecessionLength <- mean(recessions$weeks)
+medianBetweenRecessions <- median(recessions$nxtRecession, na.rm = TRUE)
+meanBetweenRecessions <- mean(recessions$nxtRecession, na.rm = TRUE)
+
+# Add factor to indicate before/after great depression
+recessions$period <- "Before Great Depression"
+recessions$period[which(recessions$begin > as.Date("1930-01-01"))] <- "After Great Depression"
+
+rm(cs, begin, end, nberIdxRunLength)
+```
+
+Figure \@ref(fig:nberBusinessCyclePeriods) shows the nberIdx time series[^NBER] from FRED. This data is an interpretation of US Business Cycle Expansions and Contractions data provided by NBER. The FRED web site has this to say about the data:
+
+> This time series is an interpretation of US Business Cycle Expansions and Contractions data provided by The National Bureau of Economic Research (NBER) at http://www.nber.org/cycles/cyclesmain.html. Our time series is composed of dummy variables that represent periods of expansion and recession. The NBER identifies months and quarters of turning points without designating a date within the period that turning points occurred. The dummy variable adopts an arbitrary convention that the turning point occurred at a specific date within the period. The arbitrary convention does not reflect any judgment on this issue by the NBER's Business Cycle Dating Committee... For this time series, the recession begins the first day of the period following a peak and ends on the last day of the period of the trough.
+
+
+[^NBER]: Federal Reserve Bank of St. Louis, NBER based Recession Indicators for the United States from the Period following the Peak through the Trough [USREC], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/USREC, March 5, 2017.]
+
+
+```{r nberBusinessCyclePeriods, fig.asp=0.4, fig.cap="Business cycle recessions declared by NBER. The gray bands indicate recessions."}
+ggplot() +
+  geom_line(data = nberIdx,
+            aes(x = date, y = recession),
+            alpha = 0) +
+  geom_rect(data = recessions,
+            aes(xmin = begin, xmax = end,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4) +
+  theme_tq() +
+  theme(axis.title.y = element_blank(), axis.text.y = element_blank(),
+        panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank()) +
+  labs(title = "Business Cycle Periods",
+       subtitle = "Gray areas indication periods of recession")
+```
+
+
+Table \@ref(tab:nberTbl) lists the beginning and ending dates for these recessions.
+
+```{r nberTbl}
+kable(recessions[, c("begin", "end", "weeks")],
+      col.names = c("Recession Start", "Recession End", "Length"),
+      caption = "NBER declared recession dates.")
+```
+
+
+## Business Cycle Characterization
+Figure \@ref(fig:nberBusinessCyclePeriods) shows when the recessions took place. This section summarizes and characterizes the recession data to give a better understanding of the essential take away points.
+
+According to Investopedia, the NBER have determined that 11 business cycles have taken place from 1945 to 2009 with an average cycle length of 69 months[^businessCycle] and our NBER data confirms those statements. From our data, the average cycle length is a `r round(mean(recessions$nxtRecession[22:33], na.rm = TRUE), 2)` weeks. This equates to `r round(mean(recessions$nxtRecession[22:33], na.rm = TRUE)*7/30.42, 0)` months if we use the average month length of 30.42 days and round the calculation to the nearest whole number. To avoid the cumbersome assumptions associated with month lengths, this paper expresses lengths in terms of weeks.
+
+Within the time period covered by the NBER data, there were `r nrow(recessions)` recessions. The overall median recession length was `r round(medianRecessionLength)` weeks. While there have been `r sum(recessions$weeks > 104)` recessions that have lasted longer than 2 years, the last such recession was in `r as.POSIXlt(recessions[tail(which(recessions$weeks > 104),1),]$begin)$year+1900`. The length of recessions since then has been shorter. In fact the median recession length since then was `r round(median(recessions[(tail(which(recessions$weeks > 104),1) + 1):(nrow(recessions)),]$weeks))` weeks. The mean recession length in that same period was `r round(mean(recessions[(tail(which(recessions$weeks > 104),1) + 1):(nrow(recessions)),]$weeks))` weeks. The median length of Business Cycles, the periods from beginning of one recession to the beginning of the next, was `r round(medianBetweenRecessions)` weeks. The average Business Cycle time was `r round(meanBetweenRecessions)` weeks. Business Cycles have been generally longer since the great depression than previous to that.
+
+
+[^businessCycle]: http://www.investopedia.com/terms/b/businesscycle.asp
+
+
+
+Figure \@ref(fig:plotRecessionLengths) shows when each recession since the beginning of 1850 began and how long each one was. The red horizontal line shows the overall median recession length in weeks, while the blue curve shows the recession length trend over the entire time period.
+
+```{r plotRecessionLengths, fig.asp=0.4, fig.cap="Recession lengths in weeks. Both the number and length of recessions has decreased since the great depression of 1929."}
+ggplot(data = recessions, aes(x = begin, y = weeks)) +
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept = medianRecessionLength,
+             color = "red") +
+  annotate("text",
+           label = "Median recession length",
+           x = as.Date("1952-01-01"), y = 66,
+           color = "red") +
+  # geom_smooth(method = "lm") +
+  geom_smooth(span = 1) +
+  annotate("text",
+           label = "Recession trend",
+           x = as.Date("1898-01-01"), y = 103,
+           color = "blue") +
+  theme_tq() +
+  xlab("Recession Start Date") +
+  ylab("Recession Length (weeks)") +
+  ggtitle("Recession Lengths and When They Started")
+```
+
+
+Figure \@ref(fig:recessionBox) shows a more visually explicit representation of the lengths of recessions before and after `r as.POSIXlt(recessions[tail(which(recessions$weeks > 104),1),]$begin)$year+1900`. The recession lengths have become both shorter and more uniform in length.
+
+```{r recessionBox, fig.asp=0.6, fig.cap="This plot of recession lengths clearly shows that recessions after the great depression of 1929 are shorter and have a tighter recession length distribution."}
+ggplot(recessions) +
+  geom_boxplot(aes(x = period, y = weeks)) +
+  theme_tq() +
+  ylab("Recession Length (weeks)") +
+  # xlab("Recession Began Before 1929") +
+  facet_wrap(~period, scales = "free_x") +
+  ggtitle("Recession Lengths Before and After the Great Depression")
+```
+
+
+
+
+# Financial Stress
+Financial stress is a term used to measure financial market developments. There can be a number of measurements that might relate to financial stress. As an example, the difference in interest rates between "risky"" investments (such as corporate bonds) and "risk free" investments (such as US Treasuries) may be used to measure default risk. Whereas liquidity risk might be measured by a financial institution's ability to secure funding to finance short-term liabilities. [The Saint Louis Financial Index](https://www.stlouisfed.org/on-the-economy/2014/june/what-is-the-st-louis-fed-financial-stress-index) is a measure that combines 18 correlated stress measures into a single stress index. The average value of the index, which begins in late 1993, is designed to be zero. Thus, zero is viewed as representing normal financial market conditions. Values below zero suggest below-average financial market stress, while values above zero suggest above-average financial market stress. While financial stress is not an absolute precursor to recessions, financial stress has been linked to deeper contractions.[^finStress] A plot of this index is shown in Figure \@ref(fig:finStress) with an overlay of the recessions that occurred. There was a prolonged period of higher than average financial stress before the recession of 2001. The measure rose above 1 again several times at the end of 2007. It peaked in October of 2008.
+
+```{r finStress, fig.asp=0.4, fig.cap="This figure shows that the financial stress was at an all-time high during the 2008 recession."}
+ggplot(finStress) +
+  geom_line(aes(x = date, y = price)) +
+  geom_rect(data = recessions[recessions$begin >= finStress$date[1],],
+            aes(xmin = begin, xmax = end,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  ylab("Index Value") +
+  ggtitle("St. Louis Financial Stress Index")
+```
+
+[^finStress]:*Financial stress and economic contractions*, Cardarelli, Elekdag and Lall, Journal of Financial Stability 7 (2011) 78–97 (https://bfi.uchicago.edu/sites/default/files/research/Financial%20Stress.pdf)
+
+
+
+
+# US Equities Market
+This section explores the history of the US equities market through various market indexes covering different sectors of the entire market.
+
+
+## Equity Market Indexes
+
+### Wilshire 5000 total market full cap index
+The Wilshire 5000 Total Market Index (Wilshire 5000) is the original U.S. total market index and first index from Wilshire Associates. Created in 1974, the Wilshire 5000 is widely accepted as the definitive benchmark for the total U.S. equity market. Monthly history is available as of December 1970[^wilshire5000]. The total market indexes are total market returns, which do include reinvested dividends. The designation Full Cap for an index signifies a float adjusted market capitalization that includes shares of stock not considered available to "ordinary" investors.
+
+
+[^wilshire5000]:Wilshire Associates, Wilshire 5000© Total Market Full Cap Index© [WILL5000INDFC], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/WILL5000INDFC.
+
+###  S&P 500
+The S&P 500 is regarded as a gauge of the large cap U.S. equities market. The index includes 500 leading companies in leading industries of the U.S. economy, which are publicly held on either the NYSE or NASDAQ, and covers 75% of U.S. equities. Since this is a price index and not a total return index, the S&P 500 index here does not contain dividends[^SP500].
+
+
+[^SP500]:S&P Dow Jones Indexes LLC, S&P 500© [SP500], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/SP500.
+
+###  Nasdaq
+The NASDAQ Composite Index is a market capitalization weighted index with more than 3000 common equities listed on the NASDAQ Stock Market. The types of securities in the index include American depository receipts (ADRs), common stocks, real estate investment trusts (REITs), and tracking stocks. The Nasdaq is regarded as the exchange on which technology stocks are traded. The index includes all NASDAQ listed stocks that are not derivatives, preferred shares, funds, exchange-traded funds (ETFs) or debentures[^NASDAQ].
+
+
+[^NASDAQ]: NASDAQ OMX Group, NASDAQ Composite Index© [NASDAQCOM], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/NASDAQCOM.
+
+### Russell 2000
+The Russell 2000 Index measures the performance of the small-cap segment of the U.S. equity universe. The Russell 2000 Index is a subset of the Russell 3000 Index representing approximately 10% of the total market capitalization of that index. It includes approximately 2000 of the smallest securities based on a combination of their market cap and current index membership. The Russell 2000 is constructed to provide a comprehensive and unbiased small-cap barometer and is completely reconstituted annually to ensure larger stocks do not distort the performance and characteristics of the true small-cap opportunity set. This series is a total market index, which assumes that all cash distributions are reinvested, in addition to tracking the price movements.[^RUS2000].
+
+
+[^RUS2000]: FTSE Russell, Russell 2000® Total Market Index© [RU2000TR], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/RU2000TR.
+
+
+## Equity Market Indexes Comparison
+```{r prepEquityIndexComparison}
+allEquityIndexes <- rbind(wilshire5000, SandP500, Nasdaq, Russell2000)
+
+equityPeriodStart <- max(c(min(wilshire5000$date, na.rm = TRUE),
+                           min(SandP500$date, na.rm = TRUE),
+                           min(Nasdaq$date, na.rm = TRUE),
+                           min(Russell2000$date, na.rm = TRUE)))
+
+equityIndexCompare <- allEquityIndexes[allEquityIndexes$date >= equityPeriodStart,]
+equityIndexCompare[which(equityIndexCompare$index == "Wilshire 5000"), ]$price <-
+  range01(equityIndexCompare[which(equityIndexCompare$index == "Wilshire 5000"),]$price, na.rm = TRUE)
+equityIndexCompare[which(equityIndexCompare$index == "S&P 500"), ]$price <-
+  range01(equityIndexCompare[which(equityIndexCompare$index == "S&P 500"),]$price, na.rm = TRUE)
+equityIndexCompare[which(equityIndexCompare$index == "Nasdaq"), ]$price <-
+  range01(equityIndexCompare[which(equityIndexCompare$index == "Nasdaq"),]$price, na.rm = TRUE)
+equityIndexCompare[which(equityIndexCompare$index == "Russell 2000"), ]$price <-
+  range01(equityIndexCompare[which(equityIndexCompare$index == "Russell 2000"),]$price, na.rm = TRUE)
+```
+
+Comparisons of the indexes are shown in Figures \@ref(fig:facetEquitytIndexes) -- \@ref(fig:plotEquityIndexComparison). Figure \@ref(fig:facetEquitytIndexes) shows each index over the time period for which data exists for that index. The histories for the indexes have different lengths. The S&P500 index (large caps) has quite a short history compared to the others. Note that the price axis on this plot is presented on a log 10 scale. The visualization facets the individual plots, one on top of the other, for easy comparison. The Nasdaq index (technologies) had a spike in the beginning of year 2000 that was not reflected in any of the other indexes. It also took a precipitous decline in the recession of 2001 from which it didn't recover until well into 2015. The Russell 2000 index (small caps), however, was stable over that entire period. This was not the case in the recession of 2008 in which all indexes suffered large declines.
+
+```{r facetEquitytIndexes, fig.cap="Several equity index values are overlayed onto the recession plot The effect of recessions is evident. In some cases, the market starts to decline before the actual recession declaration."}
+ggplot(allEquityIndexes) +
+  geom_line(aes(x = date, y = price)) +
+  geom_rect(data = recessions[recessions$begin >= Nasdaq$date[1],],
+            aes(xmin = begin, xmax = end,
+                ymin = 0, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  scale_y_log10() +
+  facet_grid(index~., scales = "free_y")
+```
+
+Figure \@ref(fig:plotEquityIndexComparison) shows a more direct comparison of the indexes behavior near the recession of 2008.
+
+Since each index has different measurement values, each index is scaled from 0 -- 1 using the price values over that period. Specifically, the period covered starts on `r equityPeriodStart` and goes through to `r Sys.Date()`. The beginning of this period is close to the start of a precipitous decline in the US equities market. From the plot we see that the high cap stock index (S&P 500) was initially at approximately `r round(mean(head(equityIndexCompare[which(equityIndexCompare$index == "S&P 500"),]$price, 30), na.rm = TRUE),2)*100`% of it's current value. The technology stocks (Nasdaq) were only at about `r round(mean(head(equityIndexCompare[which(equityIndexCompare$index == "Nasdaq"),]$price, 30), na.rm = TRUE),2)*100`% of the index's current value. Small caps (Russell 2000) were about `r round(mean(head(equityIndexCompare[which(equityIndexCompare$index == "Russell 2000"),]$price, 30), na.rm = TRUE),2)*100`% and the total market (Wilshire 5000) was about `r round(mean(head(equityIndexCompare[which(equityIndexCompare$index == "Wilshire 5000"),]$price, 30), na.rm = TRUE),2)*100`% of its current value. All indexes bottomed out at nearly the same time. The high cap stocks fell the most and the technology the least in this decline. In the decline at the end of 2015  and into 2016 (not associated with a recession), the small cap stocks took the deepest dive.
+
+```{r plotEquityIndexComparison, fig.cap="All the equities markets reacted similarly to the last recession. The S&P 500 fell the most and the Nasdaq the least. The Russell 2000 had the quickest recovery."}
+ggplot(equityIndexCompare) +
+  geom_line(aes(x = date, y = price, color = index)) +
+  geom_rect(data = recessions[nrow(recessions),],
+            aes(xmin = begin, xmax = end,
+                ymin = 0, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  ylab("Scaled Price") +
+  ggtitle("The US Equities Market by Various Indexes")
+```
+
+
+
+
+
+
+# US Corporate Bond Market
+This section explores the history of the US bond market through various market indexes covering different sectors of the entire market.
+
+
+## US Corporate Bond Market Indexes
+
+###  BofA Merrill Lynch US Corp Master Total Return Index Value[^BOFAUSCORPV]
+This index measures the performance of investment grade US corporate debt. The following paragraphs were copied directly from the Fred website:
+
+> This data represents the BofA Merrill Lynch US Corporate Master Index value, which tracks the performance of US dollar denominated investment grade rated corporate debt publically issued in the US domestic market. To qualify for inclusion in the index, securities must have an investment grade rating (based on an average of Moody's, S&P, and Fitch) and an investment grade rated country of risk (based on an average of Moody's, S&P, and Fitch foreign currency long term sovereign debt ratings). Each security must have greater than 1 year of remaining maturity, a fixed coupon schedule, and a minimum amount outstanding of $250 million. Original issue zero coupon bonds, "global" securities (debt issued simultaneously in the eurobond and US domestic bond markets), 144a securities and pay-in-kind securities, including toggle notes, qualify for inclusion in the Index. Callable perpetual securities qualify provided they are at least one year from the first call date. Fixed-to-floating rate securities also qualify provided they are callable within the fixed rate period and are at least one year from the last call prior to the date the bond transitions from a fixed to a floating rate security. DRD-eligible and defaulted securities are excluded from the Index
+
+> BofA Merrill Lynch Explains the Construction Methodology of this series as:
+Index constituents are capitalization-weighted based on their current amount outstanding. With the exception of U.S. mortgage pass-throughs and U.S. structured products (ABS, CMBS and CMOs), accrued interest is calculated assuming next-day settlement. Accrued interest for U.S. mortgage pass-through and U.S. structured products is calculated assuming same-day settlement. Cash flows from bond payments that are received during the month are retained in the index until the end of the month and then are removed as part of the rebalancing. Cash does not earn any reinvestment income while it is held in the Index. The Index is rebalanced on the last calendar day of the month, based on information available up to and including the third business day before the last business day of the month. Issues that meet the qualifying criteria are included in the Index for the following month. Issues that no longer meet the criteria during the course of the month remain in the Index until the next month-end rebalancing at which point they are removed from the Index.
+
+> When the last calendar day of the month takes place on the weekend, weekend observations will occur as a result of month ending accrued interest adjustments.
+
+
+[^BOFAUSCORPV]:BofA Merrill Lynch, BofA Merrill Lynch US Corp Master Total Return Index Value© [BAMLCC0A0CMTRIV], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/BAMLCC0A0CMTRIV
+
+
+###  BofA Merrill Lynch US Corp 1-3yr Total Return Index Value[^BOFAUS1TO3YEAR]
+The following paragraphs were copied directly from the Fred website:
+
+> This data represents the BofA Merrill Lynch US Corporate 1-3 Year Index value, a subset of the BofA Merrill Lynch US Corporate Master Index tracking the performance of US dollar denominated investment grade rated corporate debt publically issued in the US domestic market. This subset includes all securities with a remaining term to maturity of less than 3 years. When the last calendar day of the month takes place on the weekend, weekend observations will occur as a result of month ending accrued interest adjustments.
+
+
+
+[^BOFAUS1TO3YEAR]:BofA Merrill Lynch, BofA Merrill Lynch US Corp 1-3yr Total Return Index Value© [BAMLCC1A013YTRIV], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/BAMLCC1A013YTRIV
+
+
+
+### BofA Merrill Lynch US Corp AAA Total Return Index Value[^BOFAUSAAA]
+The following paragraphs were copied directly from the Fred website:
+
+> This data represents the BofA Merrill Lynch US Corporate AAA Index value, a subset of the BofA Merrill Lynch US Corporate Master Index tracking the performance of US dollar denominated investment grade rated corporate debt publically issued in the US domestic market. This subset includes all securities with a given investment grade rating AAA. When the last calendar day of the month takes place on the weekend, weekend observations will occur as a result of month ending accrued interest adjustments.
+
+
+[^BOFAUSAAA]:BofA Merrill Lynch, BofA Merrill Lynch US Corp AAA Total Return Index Value© [BAMLCC0A1AAATRIV], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/BAMLCC0A1AAATRIV.
+
+
+
+
+## Bond Market Indexes Comparison
+```{r prepBondIndexComparison}
+allBondIndexes <- rbind(bOfAUs1to3Year, bOfAUsAAA, bOfAUsTotal)
+
+# bondPeriodStart <- max(c(min(bOfAUs1to3Year$date, na.rm = TRUE),
+#                      min(bOfAUsAAA$date, na.rm = TRUE),
+#                      min(bOfAUsTotal$date, na.rm = TRUE)))
+
+# Make the dates the same as for equities to make comparisons easier
+bondPeriodStart <- equityIndexCompare$date[1]
+
+bondIndexCompare <- allBondIndexes[allBondIndexes$date >= bondPeriodStart,]
+# bondIndexCompare <- allBondIndexes[allBondIndexes$date >= equityPeriodStart,]
+bondIndexCompare[which(bondIndexCompare$index == "BofA US 1 to 3"), ]$price <-
+  range01(bondIndexCompare[which(bondIndexCompare$index == "BofA US 1 to 3"),]$price, na.rm = TRUE)
+bondIndexCompare[which(bondIndexCompare$index == "BofA US AAA"), ]$price <-
+  range01(bondIndexCompare[which(bondIndexCompare$index == "BofA US AAA"),]$price, na.rm = TRUE)
+bondIndexCompare[which(bondIndexCompare$index == "BofA US Total Return"), ]$price <-
+  range01(bondIndexCompare[which(bondIndexCompare$index == "BofA US Total Return"),]$price, na.rm = TRUE)
+```
+
+Comparisons of the indexes are shown in the Figures \@ref(fig:facetBondIndexes) -- \@ref(fig:plotBondIndexComparison). As opposed to the equities plots, the price axis on this plot is presented as a linear scale. Figure \@ref(fig:facetBondIndexes) shows each index over the time period for which data exists for that index. The visualization facets the individual plots, one on top of the other, for easy comparison. As with the equities plot, we can see that the histories of the data sets is quite different.
+
+```{r facetBondIndexes, fig.cap="Several bond index values are overlayed onto the recession plot The effect recessions is evident. Bonds are affected much less by recessions than equities."}
+ggplot(allBondIndexes) +
+  geom_line(aes(x = date, y = price)) +
+  geom_rect(data = recessions[recessions$begin >= bOfAUsTotal$date[1],],
+            aes(xmin = begin, xmax = end,
+                ymin = 0, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  facet_grid(index~., scales = "free_y")
+```
+
+Figure \@ref(fig:plotBondIndexComparison) shows a more direct comparison of the indexes behavior during recent recessions. Since each index has different scales each index is scaled from 0 -- 1 using the price values over that period. Specifically, the period covered starts on `r bondPeriodStart` and goes through to `r Sys.Date()`. From the plot we see that the index of the 1 -- 3 year bond market entering into the recession of 2008 was approximately `r round(bondIndexCompare[which(bondIndexCompare$index == "BofA US 1 to 3" & bondIndexCompare$date == min(bondIndexCompare$date)),]$price,2)*100`% of it's current value. The AAA bonds were at approximately `r round(bondIndexCompare[which(bondIndexCompare$index == "BofA US AAA" & bondIndexCompare$date == min(bondIndexCompare$date)),]$price,2)*100`% of the index's current value and the total return index was at about `r round(bondIndexCompare[which(bondIndexCompare$index == "BofA US Total Return" & bondIndexCompare$date == min(bondIndexCompare$date)),]$price,2)*100`%. The bond indexes bottomed out at about the same time but much later than the equities indexes.
+
+```{r plotBondIndexComparison, fig.cap="The bond markets contracted in the last recession too even though they were essentially unaffected by previous recessions. They fell much less however."}
+ggplot(bondIndexCompare) +
+  geom_line(aes(x = date, y = price, color = index)) +
+  geom_rect(data = recessions[nrow(recessions),],
+            aes(xmin = begin, xmax = end,
+                ymin = 0, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  ylab("Scaled Price") +
+  ggtitle("The US Bond Market by Various Indexes")
+```
+
+
+
+
+
+# Recession Recovery Time
+This section explores the time it takes for the US equities market and US corporate bond market to recover once a sustained market contraction is experienced. The recovery time is defined as the time period between the start of a sustained market contraction, through the associated market local minima, then back to the date on which a 30 day average price is equal to or higher than the 30 day average price at the start of the contraction. So the period includes both the contraction and the part of the expansion until the market returns to the price at which the contraction started. A sustained market contraction is defined to be one in which the recovery period is at least a year.
+
+```{r findMarketEvents}
+findMarketEvents <- function(idxData = NULL){
+  stopifnot(!is.null(idxData))
+  
+  loess15 <- loess(price ~ as.numeric(date), data = idxData, span = 0.13)
+  idxData$smoothedPrice <- predict(loess15, newdata = as.numeric(idxData$date))
+
+  # Add local maxima
+  localMaxima <- rollapply(idxData$smoothedPrice, 51,
+                           function(x) which.max(x) == 25)
+  idxData$localMax <- c(rep(NA, times = 25), localMaxima, rep(NA, times = 25))
+  
+  # Add local minima
+  localMinima <- rollapply(idxData$smoothedPrice, 51,
+                           function(x) which.min(x) == 25)
+  idxData$localMin <- c(rep(NA, times = 25), localMinima, rep(NA, times = 25))
+  
+  # Add 31 day rolling mean. This will be used as the
+  # market values for local minima, maxima, and recovery
+  rollMean <- rollapply(idxData$price, 31,
+                        function(x) mean(x, na.rm = TRUE))
+  idxData$rollMean <- c(rep(NA, times = 15), rollMean, rep(NA, times = 15))
+  
+  # Create a data frame of market events. We will use this
+  # to find the recovery dates
+  u <- idxData[which(idxData$localMax == TRUE),
+                 c("date", "rollMean")]
+  
+  d <- idxData[which(idxData$localMin == TRUE),
+                 c("date", "rollMean")]
+  
+  marketEvents <- cbind(u, d)
+  colnames(marketEvents) <- c("begin", "priceBegin", "end", "priceEnd")
+  
+  # Find recovery dates
+  marketEvents$recovered <-
+    as.Date(sapply(split(marketEvents, seq(nrow(marketEvents))),
+                   FUN = function(i){
+                     rd <- idxData[idxData$date > i$end &
+                                       idxData$rollMean >= i$priceBegin,]$date[1]
+                     }))
+  marketEvents$priceRecovered <-
+    idxData[idxData$date %in% marketEvents$recovered,]$rollMean
+  
+  # Calculate periods of decline, rise and total cycle time
+  marketEvents$cycleWeeks <- as.numeric(difftime(marketEvents$recovered,
+                                                 marketEvents$begin, units = "weeks"))
+  marketEvents$declineWeeks <- as.numeric(difftime(marketEvents$end,
+                                                   marketEvents$begin, units = "weeks"))
+  marketEvents$recoverWeeks <- as.numeric(difftime(marketEvents$recovered,
+                                                   marketEvents$end, units = "weeks"))
+  
+  # Calculate percent of index lost
+  marketEvents$percentLost <-
+    (marketEvents$priceBegin - marketEvents$priceEnd)/marketEvents$priceBegin * 100
+  
+  return(list(events = marketEvents, data = idxData))
+}
+```
+
+## US Equities Recovery Time
+
+```{r equitiesRecovery}
+equityRecoveryData <- wilshire5000[wilshire5000$date >= as.Date("1995-01-01"),]
+
+equityMarketEventsList <- findMarketEvents(equityRecoveryData)
+equityIndexData <- equityMarketEventsList[["data"]]
+equityMarketEvents <- equityMarketEventsList[["events"]]
+equityMarketEvents <- equityMarketEvents[equityMarketEvents$cycleWeeks > 52,]
+```
+
+This analysis uses the Wilshire 5000 index as a surrogate for the total market and includes the time period enclosing the last two recessionary and inflationary periods. The beginning of a sustained equities market contraction does not coincide with the beginning of a recession period as indicated by the NBER recession index. So in order to find when the market has entered into and recovered from a recession, a smooth curve is fit to the index values and local maxima and minima of that smoothed curve are used to determine the beginning and end of market contractions. A rolling 30 day average of the index price, centered on each maxima and minima, is used to determine the price values at the beginning and end of each contraction. The recovery date is determined by finding the first occurrence of a 30 day average Index value occurring after the market minima indicating the end of a contraction that is equal to or greater than the market value at the beginning of the contraction. Table \@ref(tab:tblEquitiesRecoveryTiming) shows the timing of the US equities market events associated with recent recessions, and Table \@ref(tab:tblEquitiesRecoveryPrice) shows the index prices associated with the recessions.
+```{r tblEquitiesRecoveryTiming}
+kable(equityMarketEvents[, c("begin", "end", "recovered", "declineWeeks", "recoverWeeks", "cycleWeeks")],
+      row.names = FALSE,
+      col.names = c("Start of Decline", "End of Decline", "Date Recovered", "Weeks in Decline",
+                    "Weeks in Recovery", "Total Cycle Length"),
+      caption = "Timing of US Equity Market Events Associated with Recent Recessions")
+```
+
+```{r tblEquitiesRecoveryPrice}
+kable(equityMarketEvents[, c("priceBegin", "priceEnd", "priceRecovered", "percentLost")],
+      row.names = FALSE,
+      col.names = c("Beginning Price","Ending Price",  "Price at Recovery", "Percent Lost"),
+      caption = "Index Values of US Equity Market Events Associated with Recent Recessions")
+```
+
+Figure \@ref(fig:plotEquityRecovery) shows the results of this analysis. The black points on the graphic are the Wilshire 5000 Index values for each day. The date and index value associated with the beginning of significant equity market contractions are shown with green points. Red points show the end of the contractions and the Yellow points show the recovery points. Notice that there is one cycle in 2015 that is not associated with a recession. The average recovery length, in weeks, of the two contractions associated with recessions is `r round(mean(equityMarketEvents$cycleWeeks[1:2]), 2)` weeks (about `r round(mean(equityMarketEvents$cycleWeeks[1:2])/52, 2)` years).
+
+```{r plotEquityRecovery, fig.cap="The equities market can start contracting before the declared start of recessions and can take a long time to recover."}
+ggplot() +
+  geom_point(data = equityRecoveryData, aes(x = date, y = price),
+             size = 0.15, alpha = 0.25) +
+  # geom_line(data = indexData, aes(x = date, y = smoothedPrice),
+  #           color = "blue", alpha = 0.4) +
+  geom_point(data = equityMarketEvents, aes(x = begin, y = priceBegin),
+             color = "chartreuse2", size = 3) +
+  geom_point(data = equityMarketEvents, aes(x = end, y = priceEnd),
+             color = "red", size = 3) +
+  geom_point(data = equityMarketEvents, aes(x = recovered, y = priceRecovered),
+             color = "gold", size = 3) +
+  geom_rect(data = recessions[recessions$begin >= equityIndexData$date[1],],
+            aes(xmin = begin, xmax = end,
+                ymin = 0, ymax = Inf),
+            alpha = 0.2) +
+  annotate("text", label = "Start of contraction",
+           x = as.Date("2000-04-01"), y = 50,
+           color = "chartreuse2") +
+  annotate("text", label = "End of contraction",
+           x = as.Date("2003-04-01"), y = 23,
+           color = "red") +
+  annotate("text", label = "Recovered",
+           x = as.Date("2005-03-01"), y = 50,
+           color = "gold") +
+  annotate("text", label = "Recession",
+           x = as.Date("2001-09-01"), y = 85,
+           color = "gray40") +
+  theme_tq() +
+  ggtitle("Recession Recovery on the Wilshire 5000 Index")
+```
+
+
+## US Corporate Bonds Recovery Time
+
+```{r bondsRecovery}
+bondRecoveryData <- bOfAUsTotal[bOfAUsTotal$date >= as.Date("1995-01-01"),]
+
+bondMarketEventsList <- findMarketEvents(bondRecoveryData)
+bondIndexData <- bondMarketEventsList[["data"]]
+bondMarketEvents <- bondMarketEventsList[["events"]]
+bondMarketEvents <- bondMarketEvents[bondMarketEvents$cycleWeeks > 52,]
+```
+
+This analysis uses the Bank of America Merrill Lynch US Corporations Master Total Return Index value and includes the time period enclosing the last two recessionary and inflationary periods. As with the equities market, the beginning of a sustained bond market contraction does not coincide with the beginning of a recession period as indicated by the NBER recession index. We use the same methodology to find the beginning, bottom and end of the contraction as described in the equities recovery time section above. Table \@ref(tab:tblBondsRecoveryTiming) shows the recovery timing and Table \@ref(tab:tblBondRecoveryPrice) shows the associated prices.
+```{r tblBondsRecoveryTiming}
+kable(bondMarketEvents[, c("begin", "end", "recovered", "declineWeeks", "recoverWeeks", "cycleWeeks")],
+      row.names = FALSE,
+      col.names = c("Start of Decline", "End of Decline", "Date Recovered", "Weeks in Decline",
+                    "Weeks in Recovery", "Total Cycle Length"),
+      caption = "Timing of US Bond Market Events Associated with Recent Recessions")
+```
+
+```{r tblBondRecoveryPrice}
+kable(bondMarketEvents[, c("priceBegin", "priceEnd", "priceRecovered", "percentLost")],
+      row.names = FALSE,
+      col.names = c("Beginning Price","Ending Price",  "Price at Recovery", "Percent Lost"),
+      caption = "Index Values of US Bond Market Events Associated with Recent Recessions")
+```
+
+Figure \@ref(fig:plotBondRecovery) shows the bond recovery plot. The black points on the graphic are the Bank of America Merrill Lynch US Corporations Master Total Return Index values for each day. The date and index value associated with the beginning of significant bond market contractions are shown with green points. Red points show the end of the contractions and the Yellow points show the recovery points. Notice that there is one cycle in 2000 that is not associated with a recession and the recession of 2001 was not accompanied by a contraction in the Bonds market. The recovery length, in weeks, of the contraction associated with the recession of 2007 was `r round(bondMarketEvents[as.POSIXlt(bondMarketEvents$begin)$year+1900 == "2007",]$cycleWeeks, 2)` weeks (about `r round(bondMarketEvents[as.POSIXlt(bondMarketEvents$begin)$year+1900 == "2007",]$cycleWeeks/52, 2)` years).
+
+```{r plotBondRecovery, fig.cap="The bond markets start contraction gradually and recover much more quickly."}
+ggplot() +
+  geom_point(data = bondIndexData, aes(x = date, y = price),
+             size = 0.15, alpha = 0.25) +
+  # geom_line(data = bondIndexData, aes(x = date, y = smoothedPrice),
+  #           color = "blue") +
+  geom_point(data = bondMarketEvents, aes(x = begin, y = priceBegin),
+             color = "chartreuse2", size = 3) +
+  geom_point(data = bondMarketEvents, aes(x = end, y = priceEnd),
+             color = "red", size = 3) +
+  geom_point(data = bondMarketEvents, aes(x = recovered, y = priceRecovered),
+             color = "gold", size = 3) +
+  geom_rect(data = recessions[recessions$begin >= bondIndexData$date[1],],
+            aes(xmin = begin, xmax = end,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  annotate("text", label = "Start of contraction",
+           x = as.Date("2006-04-01"), y = 1800,
+           color = "chartreuse2") +
+  annotate("text", label = "End of contraction",
+           x = as.Date("2008-04-01"), y = 1400,
+           color = "red") +
+  annotate("text", label = "Recovered",
+           x = as.Date("2011-03-01"), y = 1750,
+           color = "gold") +
+  annotate("text", label = "Recession",
+           x = as.Date("2001-09-01"), y = 1500,
+           color = "gray40") +
+  theme_tq() +
+  ggtitle("Recession Recovery on the BofA US Master Total Return Index")
+```
+
+
+
+
+
+# Asset Allocation Strategy
+This section describes an investment strategy based on observations of the behavior of the bonds and equities markets during recessions. The main observations are that the bond market does not always experience a contraction in a recession, and when it does, the contraction is less severe than for the equities market. The equities market gives higher yields than the bond market in the expansionary periods, between the end of one contraction and the beginning of the next. The asset allocation strategy is quite straight forward -- use the market with the highest return (or least negative return) for each period. Execution of the strategy, however, is not straight forward since it requires the prediction of the start and end of contractions.
+
+
+## Predicting Recessions{#predRec}
+While NBER is the authoritative source of the determination of contraction and expansion periods, these determinations can take quite some time to make because while some of the data used by NBER can be estimated in a timely fashion, subsequent revisions can be significant. As a consequence, NBER has taken between 6 and 21 months to declare turning points in the business cycle. A more real-time determination is needed. The sub sections below discuss several options.
+
+
+### GDP-based Recession Indicator
+The GDP recession index measures the probability that the U.S. economy was in a recession during the indicated quarter using the measured GDP growth in that quarter and the probability that level of GDP growth occurs in a recessionary period. The probability distribution is based on historical values of GDP growth within postwar recessions. Whereas the NBER business cycle dates are based on a subjective assessment of a variety of indicators that may not be released until several years after the event, this index is based solely on currently available GDP data and is reported every quarter. Due to the possibility of data revisions and the challenges in accurately identifying the business cycle phase, the index is calculated for the quarter just preceding the most recently available GDP numbers. Once the index is calculated for that quarter, it is never subsequently revised. If the value of the index rises above 67% that is a historically reliable indicator that the economy has entered a recession. Once this threshold has been passed, if it falls below 33% that is a reliable indicator that the recession is over[^GDP_BC].
+
+The actual recession dates are determined using a Bayesian calculations[^gdpBayes] that conditions the GDP probability index with the prior probability that any given quarter is in a recession and also on the prior probability that once in a period of recession or expansion, you are likely to stay in that same state. A good description of the algorithm is given [here](http://econbrowser.com/recession-index). Unfortunately, this method looks back at least two quarters to make a determination and the actual determined start of a recession can propagate back further than that. For example Table \@ref(tab:gdpTable) shows the dates of recession announcements as well as the announcement itself (i.e. date of the start or end of a recession period). The announcement date declaring the beginning of a recession in Q4 of 2007 did not happen until February of 2009.
+
+```{r gdpRecessionDateAnnouncements}
+gpdAnnouncements <-
+  data.frame(`Announcement Date` = c(as.yearmon("1970-05"), as.yearmon("1971-08"),
+                                     as.yearmon("1974-05"), as.yearmon("1976-02"),
+                                     as.yearmon("1979-11"), as.yearmon("1981-05"),
+                                     as.yearmon("1982-02"), as.yearmon("1983-08"),
+                                     as.yearmon("1991-02"), as.yearmon("1993-02"),
+                                     as.yearmon("2002-02"), as.yearmon("2002-08"),
+                                     as.yearmon("2009-02"), as.yearmon("2010-05")),
+             Event = c("Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended",
+                       "Recession Began", "Recession Ended"),
+             `Event Date` = c(as.yearqtr("1969 Q2"), as.yearqtr("1970 Q4"),
+                              as.yearqtr("1973 Q4"), as.yearqtr("1975 Q1"),
+                              as.yearqtr("1979 Q2"), as.yearqtr("1980 Q2"),
+                              as.yearqtr("1981 Q2"), as.yearqtr("1982 Q4"),
+                              as.yearqtr("1989 Q4"), as.yearqtr("1991 Q4"),
+                              as.yearqtr("2001 Q1"), as.yearqtr("2001 Q3"),
+                              as.yearqtr("2007 Q4"), as.yearqtr("2009 Q2")),
+             `Lead Time` = c(-6, -8, -5, -11, -5, -11, -8, -8, -2, -14, -2, -11, -14, -11),
+             stringsAsFactors = FALSE,
+             check.names = FALSE)
+```
+
+
+
+A plot of the GDP-based index and associated predictions is shown in Figure \@ref(fig:gdpPredictions). The light blue line shows the raw index values, the dark blue line shows the interpretation (i.e., recession or not), and the shaded areas show the dates of the NBER recessions.
+
+```{r gdpPredictions, fig.asp=0.4, fig.cap="Recession prediction using a GDP model."}
+ggplot() +
+  geom_step(data = gdpIdxDates, aes(x = date, y = recession),
+            color = "midnightblue") +
+  geom_line(data = gdpIdx, aes(x = date, y = probability/100),
+            color = "blue", alpha = 0.3) +
+  geom_rect(data = recessions[recessions$begin >= gdpIdxDates$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  scale_y_continuous(labels = scales::percent) +
+  ylab("Measure\n(In Recession\nProbability in Recession)") +
+  ggtitle("GDP-Based Recession Prediction")
+```
+
+
+[^GDP_BC]: Hamilton, James, Dates of U.S. recessions as inferred by GDP-based recession indicator [JHDUSRGDPBR], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/JHDUSRGDPBR, March 4, 2017.
+
+[^gdpBayes]: http://econweb.ucsd.edu/~jhamilton/chauvet_hamilton_may_05.pdf
+
+
+
+```{r gdpTable}
+kable(gpdAnnouncements, caption = "GDP-based recession indicator recession announcements")
+```
+
+### Smoothed Recession Probabilities Indicator
+```{r getSmoothedRecessionDates}
+r <- rle(smoothedRecessionProb$recession)
+f <- cumsum(r$lengths)
+fEnd <- f[which(r$values == 1)]
+fEnd <- fEnd + 1
+fStart <- f[which(r$values == 0)]
+fStart <- fStart + 1
+fStart <- fStart[1:(length(fStart)-1)]
+recProbTbl <- data.frame("Recession Start" = smoothedRecessionProb[fStart,]$date,
+                         "Recession End" = smoothedRecessionProb[fEnd,]$date,
+                         "Lead Time (Start)" = c(1, -7, -1, -1, -7, -2, -1, -3),
+                         "Lead Time (End)" = c(-1, -1, -1, 8, -1, -1, 1, -1))
+rm(r, f, fEnd, fStart)
+```
+Smoothed recession probabilities for the United States are obtained from a dynamic-factor Markov-switching model applied to four monthly coincident variables: non-farm payroll employment, the index of industrial production, real personal income excluding transfer payments, and real manufacturing and trade sales. This model was originally developed in Chauvet, M., "An Economic Characterization of Business Cycle Dynamics with Factor Structure and Regime Switching", *International Economic Review*, 1998, 39, 969-996[^REC_PROB]. The report can be found [here](http://faculty.ucr.edu/~chauvet/ier.pdf). The plot is shown in Figure \@ref(fig:probRecessionPredictions). A table of predicted recession begin and end dates is given in \@ref(tab:recProbTbl).
+
+
+
+[^REC_PROB]: Piger, Jeremy Max and Chauvet, Marcelle, Smoothed U.S. Recession Probabilities [RECPROUSM156N], retrieved from FRED, Federal Reserve Bank of St. Louis; https://fred.stlouisfed.org/series/RECPROUSM156N, March 4, 2017.
+
+```{r probRecessionPredictions, fig.asp=0.4, fig.cap="Smoothed recession probabilities."}
+ggplot() +
+  geom_line(data = smoothedRecessionProb, aes(x = date, y = probability),
+            color = "blue", alpha = 0.3) +
+  geom_step(data = smoothedRecessionProb, aes(x = date, y = recession),
+            color = "midnightblue") +
+  geom_rect(data = recessions[recessions$begin >= smoothedRecessionProb$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  geom_hline(yintercept = 0.25, color = "red", linetype = "dashed") +
+  theme_tq() +
+  scale_y_continuous(labels = scales::percent) +
+  ylab("In Recession") +
+  ggtitle("Smoothed Recession Probabilities", subtitle = "shows best prediction capability when a 25% threshold is used.")
+```
+
+
+```{r recProbTbl}
+kable(recProbTbl,
+      col.names = c("Recession Start", "Recession End", "Lead Time (Start)", "Lead Time (End)"),
+      caption = "Recession dates from the Smoothed Recession Probabilities Indicator")
+```
+
+
+### Morgan Stanley Recession Risk Model
+The Morgan Stanley Recession Risk Model (MSRISK) is based on a regime-switching scheme anchored to [The Conference Board’s Composite Index of Leading Economic Indicators (LEI)](https://www.conference-board.org/data/bci/index.cfm?id=2160)[^MSRISK]. According to the paper, the MSRISK "examines changes in the LEI and compares those changes to historical patterns at different stages of the business cycle. While the causes of a recession vary across time and geography, the fallout behaves similarly from recession to recession. This phenomenon is what underpins the MSRISK’s ability to calculate short-term risks with historical data".
+
+
+[^MSRISK]: Introducing the Morgan Stanley Recession Risk Model, Reinhart, et. al., July 15, 2014.
+
+A plot of the MSRISK model is shown in Figure \@ref(fig:morganRiskModel) and a table of months of lead time produced from the model is shown in Table \@ref(tab:msriskTbl). A negative lead time means the prediction lags the actual start of the recession by that number of months.
+
+```{r morganRiskModel, fig.asp=0.6, fig.cap="The Morgan Stanley Recession Risk Model shows good results using a 95% threshold"}
+pp <- readPNG("../Morgan Stanley Risk Model/msrisk Historical Performance.png")
+plot.new()
+rasterImage(pp,0,0,1,1)
+```
+
+
+```{r msriskTbl}
+msrisk <- data.frame("Recession Start" = c(as.Date("1969-12-01"), as.Date("1973-11-01"),
+                                            as.Date("1980-01-01"), as.Date("1981-07-01"),
+                                            as.Date("1990-07-01"), as.Date("2001-03-01"),
+                                            as.Date("2007-12-01")),
+                      "Lead Time" = c(0, 0, 7, 1, -1, 4, 1),
+                      check.names = FALSE)
+kable(msrisk, caption = "Morgan Stanley Recession Risk Lead Time (months)")
+```
+
+
+### Other Recession Indicators
+There are actually many recession indicators. The list in this section gives a brief description of some of them and includes links where more information can be obtained.
+
+* **ECRI U.S. Weekly Leading Index**: The Economic Cycle Research Institute (ECRI) was founded in 1996 by Geoffrey Moore who, in the 1960's gave his original Index of Leading Economic Indicators to the US government. Before there was a committee to determine U.S. business cycle dates, Moore decided all those dates on the NBER's behalf from 1949 to 1978, and then served as the committee's senior member until he passed away in 2000. The ECRI has evolved their approach to what is today the Weekly Leading Index (WLI). The U.S. WLI is a composite leading index that anticipates cyclical turning points in U.S. economic activity by 2-3 quarters. Cycles in economic activity are captured by the U.S. Weekly Coincident Index, which is a comprehensive measure of the economy's current state, tracking indicators of production, employment, income, and sales. The *Economist magazine* noted in 2005, “ECRI is perhaps the only organisation to give advance warning of each of the past three recessions; just as impressive, it has never issued a false alarm.” More information on the ECRI weekly leading index can be found on the [website](https://www.businesscycle.com/ecri-reports-indexes/recession-recovery).
+
+* **ECRI U.S. Weekly Coincident Index**: 
+* **Recession Alert's RFE Index**: RecessionAlert is a company that focuses on U. S. recession forecasting. Their [Recession Forcasting Ensemble (RFE) Index](http://recessionalert.com/recession-forecasting-ensemble-rfe-macro-market-timing/) is based on six component indexes. RecessionAlert has an article on the [usefulness of early warning](http://recessionalert.com/useful-warning/).
+* **The Conference Board's LEI**: From their [web site](https://www.conference-board.org/about/index.cfm?id=1980): "The Conference Board is a global, independent business membership and research association... [whose agenda is] to help leaders navigate the biggest issues impacting business...". They publish [economic indicators](https://www.conference-board.org/data/), including the Leading Economic Indicator (LEI).
+* **E-Forecasting Economic Indicators**: This company has a [page of forecasts](http://www.e-forecasting.com/Indicators.htm) on its website which includes a number of indicators and forecasts.
+* **FRED Business Cycle Data** The Federal Reserve Economic Data (FRED) web site contains a [page of economic indicators](https://fred.stlouisfed.org/categories/32262).
+
+The *Advisor Perspectives Updates* [web site](https://www.advisorperspectives.com/dshort/updates) consolidates some of these indicators under the "General Economic Indicators" Section and updates some of the indexes regularly.
+
+
+
+
+## Predicting Downturns{#downturns}
+For our investment strategy, predicting recessions is only done because of the correlation of recessions to market downturns. However, as can be seen in Figures \@ref(fig:plotEquityRecovery) and \@ref(fig:plotBondRecovery), market downturns are not exactly coincident with recessions. There have been times when bond market prices were not adversely affected by recessions and there have been times when the bond market and/or equities market has declined when there was no recession. In this section the use of a moving average on index price is explored. Such a signal is easy to construct, is real time, and has the benefit of using a direct measurement instead of a correlated measurement. However, it can lead to investment whipsaws that leave the investor "shooting behind the duck".
+
+
+
+### 200 Day Simple Moving Average as an Indicator
+```{r smaIndicator}
+# Add 200 day SMA
+wilshire5000 <- wilshire5000 %>%
+    tq_mutate(select = price, mutate_fun = SMA, n = 200) %>%
+  rename(SMA.200 = SMA)
+# Add 25 day SMA  ##### Play with this SMA to decide the appropriate n #########
+wilshire5000 <- wilshire5000 %>%
+    tq_mutate(select = price, mutate_fun = SMA, n = 25) %>%
+  rename(SMA.25 = SMA)
+# Add recession signal1 (price < 200 day SMA)
+wilshire5000$recession1 <- 0
+wilshire5000[which(wilshire5000$price < wilshire5000$SMA.200), ]$recession1 <- 1
+# Add recession signal2 (25 day SMA < 200 day SMA)
+wilshire5000$recession2 <- 0
+wilshire5000[which(wilshire5000$SMA.25 < wilshire5000$SMA.200), ]$recession2 <- 1
+
+# We only evaluate at the beginning of the month
+wilshire5000$month <- as.POSIXlt(wilshire5000$date)$mon
+wilshire5000$prevMonth <- c(NA, wilshire5000$month[1:(nrow(wilshire5000)-1)])
+wilshire5000$newMonth <- wilshire5000$month != wilshire5000$prevMonth
+wilshire5000DecisionDates <- wilshire5000[wilshire5000$newMonth,]
+wilshire5000DecisionDates <- wilshire5000DecisionDates[complete.cases(wilshire5000DecisionDates),]
+```
+
+In this section a 200 day simple moving average is applied to the Wilshire 5000 index price to evaluate its usefulness in providing a signal for the end of a bull market (start of a recession). Two signal constructions are explored. The first compares the index price to the 200 day simple moving average. A recession start signal is generated when the price drops below the 200 day simple moving average and the end signal is generated when the price moves above the simple moving average. These signals are evaluated only at the beginning of a month. Figure \@ref(fig:smaSignal1Plot) shows the signals generated. The second approach uses a 25 day simple moving average to smooth the price before comparison to the 200 day simple moving average. The signal generation is the same; when the 25 day simple moving average falls below the 200 day simple moving average, a decline signal is generated. When it rises above the 200 day simple moving averge, the period of decline has ended. Figure \@ref(fig:smaSignal2Plot) shows these signals.
+
+```{r smaSignal1Plot, fig.asp=0.4, fig.cap="200 Day Simple Moving Average used as a re-allocation indicator."}
+maxY <- max(wilshire5000$price)
+ggplot(wilshire5000) +
+  geom_line(aes(x = date, y = price)) +
+  geom_line(aes(x = date, y = SMA.200), color = "blue", alpha = 0.4) +
+  # geom_line(aes(x = date, y = SMA.25), color = "blue", alpha = 0.3) +
+  geom_step(data = wilshire5000DecisionDates,
+            aes(x = date, y = recession1 * maxY), color = "midnightblue") +
+  geom_rect(data = recessions[recessions$begin >= wilshire5000$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  ggtitle(label = "200 Day Simple Moving Average Indicator",
+          subtitle = "When the price dips below the SMA at the evaluation points, a market decline is indicated.")
+```
+
+
+
+```{r smaSignal2Plot, fig.asp=0.4, fig.cap="200 Simple Moving Average with a 25 day Simple Moving average used as a re-allocation signal."}
+maxY <- max(wilshire5000$price)
+ggplot(wilshire5000) +
+  geom_line(aes(x = date, y = SMA.25)) +
+  geom_line(aes(x = date, y = SMA.200), color = "blue", alpha = 0.4) +
+  geom_step(data = wilshire5000DecisionDates,
+            aes(x = date, y = recession2 * maxY), color = "midnightblue") +
+  geom_rect(data = recessions[recessions$begin >= wilshire5000$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  ggtitle(label = "200 Day SMA with 25 Day SMA Dampening Indicator",
+          subtitle = "When the 25 day SMA dips below the SMA at the evaluation points, a market decline is indicated.")
+```
+
+
+
+
+
+
+## Performance Evaluation
+This section explores the performance of the allocation strategy for using signals from either a recession model or the Simple Moving Average method. The Wilshire 5000 index is used to represent equity market performance and the Bank of America Merrill Lynch US Corporations Master Total Return Index is used to represent the bond market performance.
+
+### Recession Model Portfolio Growth
+```{r recessionModelPerformance}
+# Dates of switch to equities
+switchToEquities <- lapply(equityMarketEvents$priceBegin, FUN = function(x){
+  as.Date(unlist(lapply(c(0.9, 0.8, 0.7), FUN = function(p){
+    f <- which(equityIndexData$rollMean <= p*x &
+                 equityIndexData$date >
+                 equityIndexData[which(equityIndexData$rollMean == x),]$date)
+    head(equityIndexData[f,]$date, 1)
+  })), origin = as.Date("1970-01-01"))
+})
+
+# order them for my sanity
+switchToEquities[[1]] <- switchToEquities[[1]][order(switchToEquities[[1]])]
+switchToEquities[[2]] <- switchToEquities[[2]][order(switchToEquities[[2]])]
+switchToEquities <- as.data.frame(switchToEquities)
+colnames(switchToEquities) <- c("bond1End", "bond2End")
+
+
+# Dates of switch to bonds
+switchToBonds <- lapply(equityMarketEvents$begin, FUN = function(s){
+  c(seq.Date(from = s, by = "-1 month", length.out = 12),
+    tail(seq.Date(from = s, by = "1 month", length.out = 3), 2))
+})
+# order them for my sanity
+switchToBonds[[1]] <- switchToBonds[[1]][order(switchToBonds[[1]])]
+switchToBonds[[2]] <- switchToBonds[[2]][order(switchToBonds[[2]])]
+switchToBonds <- as.data.frame(switchToBonds)
+colnames(switchToBonds) <- c("bond1Start", "bond2Start")
+
+allSwitches <- data.frame(matrix(nrow = nrow(switchToEquities) * nrow(switchToBonds),
+                                 ncol = 4))
+colnames(allSwitches) <- c("bond1Start", "bond1End", "bond2Start", "bond2End")
+allSwitches$bond1Start <- rep(switchToBonds$bond1Start, each = nrow(switchToEquities))
+allSwitches$bond2Start <- rep(switchToBonds$bond2Start, each = nrow(switchToEquities))
+allSwitches$bond1End <- rep(switchToEquities$bond1End, times = nrow(switchToBonds))
+allSwitches$bond2End <- rep(switchToEquities$bond2End, times = nrow(switchToBonds))
+
+rm(switchToBonds, switchToEquities)
+
+baselineReturns <-
+  wilshire5000MonthlyReturns[wilshire5000MonthlyReturns$date > as.Date("1994-12-31"),]
+
+baselineGrowth <- baselineReturns %>% 
+  tq_portfolio(assets_col = index,
+               returns_col = monthly.returns,
+               col_rename = "investment.growth",
+               wealth.index = TRUE)
+baselineGrowth$portfolio <- "baseline"
+
+# Calculate annualized return
+baselineAnnualizedReturn <- baselineReturns %>%
+  tq_performance(Ra = monthly.returns,
+                 Rb = NULL,
+                 performance_fun = Return.annualized)
+  
+
+# construct portfolio growth vectors. For each recession start
+# go through all recession end dates. Growth will be from equities
+# from the beginning date (Jan. 1995) to recession start month,
+# then switch to bond growth until recession end month, then back
+# to equity growth
+
+modelReturns <- lapply(1:nrow(allSwitches), FUN = function(x){
+  returns <- baselineReturns
+    
+  returns[which(returns$date > allSwitches$bond1Start[x] &
+                returns$date < allSwitches$bond1End[x]),]$monthly.returns <-
+    bOfAUsTotalMonthlyReturn[which(bOfAUsTotalMonthlyReturn$date >
+                                     allSwitches$bond1Start[x] &
+                                     bOfAUsTotalMonthlyReturn$date < allSwitches$bond1End[x]),]$monthly.returns
+  returns[which(returns$date > allSwitches$bond1Start[x] &
+                  returns$date < allSwitches$bond1End[x]),]$index <-
+    bOfAUsTotalMonthlyReturn$index[1]
+  
+  returns[which(returns$date > allSwitches$bond2Start[x] &
+                  returns$date < allSwitches$bond2End[x]),]$monthly.returns <-
+    bOfAUsTotalMonthlyReturn[which(bOfAUsTotalMonthlyReturn$date >
+                                     allSwitches$bond2Start[x] &
+                                     bOfAUsTotalMonthlyReturn$date < allSwitches$bond2End[x]),]$monthly.returns
+  returns[which(returns$date > allSwitches$bond2Start[x] &
+                  returns$date < allSwitches$bond2End[x]),]$index <-
+    bOfAUsTotalMonthlyReturn$index[1]
+  returns$portfolio <- paste("portfolio", x, sep = "_")
+  returns
+})
+
+modelGrowths <- do.call(rbind, lapply(modelReturns, FUN = function(x){
+  growths <- tq_portfolio(x, assets_col = portfolio,
+                          returns_col = monthly.returns,
+                          col_rename = "investment.growth",
+                          wealth.index = TRUE)
+  growths$portfolio <- x$portfolio[1]
+  growths
+}))
+```
+
+As seen in Section \@ref(predRec) recession models vary in their ability to predict when a recession starts and ends (or is some cases, had started, or ended). The GDP-based Recession Indicator only determines recession begin and end dates well after those dates have passed rendering that model useless to generate an asset re-allocation signal. The same is true for the Smoothed Recession Probabilities Indicator. The Morgan Stanely model generates a signal *around* the begin and end dates -- usually before, but sometimes after the actual NBER-declared date. Unfortunately, the data I have for the Morgan Stanley model does not include recession end dates. To determine the performance of a strategy that uses this model to generate signals that trigger investment re-allocations this section evaluates the growth of a portfolio for a number of potential signal lead times. Although the signals in the Morgan Stanley model range from 7 months before to 1 month after the actual recession start dates, this analysis will explore a range from 12 months before to 2 months after the NBER-declared recession start dates. A second range of of signals will be considered for the re-allocation of funds from the bond market to the equities market. The timing of these signals will be determined from decline in the equities market. The reallocation dates will be determined from a loss in the equities market of 10%, 20%, and 30%. Figure \@ref(fig:plotModelGrowth) shows the growths for each run. The red line shows the growth of an investment in which no re-allocation was performed. Every model run tested shows better growth.
+
+```{r plotModelGrowth, fig.asp=0.5, fig.cap="Growth of a Model-Based re-allocation strategy. The red line represents the growth of an equities only investment with no re-allocation."}
+ggplot() +
+  geom_line(data = modelGrowths,
+            aes(x = date, y = investment.growth, group = portfolio),
+            alpha = 0.5) +
+  geom_line(data = baselineGrowth,
+            aes(x = date, y = investment.growth), color = "red") +
+  geom_rect(data = recessions[recessions$begin >= baselineGrowth$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq()
+```
+
+
+
+### Simple Moving Average Portfolio Growth
+```{r smaSwitching}
+# Find the start and end dates of declines as defined when the price
+# drops below the 200 day SMA
+wilshire5000DecisionDates <- wilshire5000DecisionDates[wilshire5000DecisionDates$date >
+                                                        as.Date("1994-12-31"),]
+recession1Rle <- rle(wilshire5000DecisionDates$recession1)
+recession1Rle[["starts"]] <- cumsum(recession1Rle[["lengths"]])
+recession1Rle[["ends"]] <-
+  ifelse(recession1Rle[["values"]]==1, recession1Rle[["starts"]], NA)
+recession1Rle[["starts"]] <-
+  ifelse(recession1Rle[["values"]]==0, recession1Rle[["starts"]]+1, NA)
+sma1Switch <-
+  data.frame(begin = wilshire5000DecisionDates[recession1Rle[["starts"]][1:(length(recession1Rle[["starts"]])-1)],]$date,
+             end = wilshire5000DecisionDates[recession1Rle[["ends"]][2:length(recession1Rle[["ends"]])],]$date)
+sma1Switch <- sma1Switch[complete.cases(sma1Switch),]
+sma1Switch <- sma1Switch[sma1Switch$begin != sma1Switch$end,]
+
+recession2Rle <- rle(wilshire5000DecisionDates$recession2)
+recession2Rle[["starts"]] <- cumsum(recession2Rle[["lengths"]])
+recession2Rle[["ends"]] <-
+  ifelse(recession2Rle[["values"]]==1, recession2Rle[["starts"]], NA)
+recession2Rle[["starts"]] <-
+  ifelse(recession2Rle[["values"]]==0, recession2Rle[["starts"]]+1, NA)
+sma2Switch <-
+  data.frame(begin = wilshire5000DecisionDates[recession2Rle[["starts"]][1:(length(recession2Rle[["starts"]])-1)],]$date,
+             end = wilshire5000DecisionDates[recession2Rle[["ends"]][2:length(recession2Rle[["ends"]])],]$date)
+sma2Switch <- sma2Switch[complete.cases(sma2Switch),]
+sma2Switch <- sma2Switch[sma2Switch$begin != sma2Switch$end,]
+
+# Construct a data frame of returns for SMA 1 strategy (i.e., compare
+# price directly to 200 SMA)
+sma1Returns <- baselineReturns
+
+for(x in 1:nrow(sma1Switch)){
+  sma1Returns[which(sma1Returns$date > sma1Switch$begin[x] &
+                sma1Returns$date < sma1Switch$end[x]),]$monthly.returns <-
+    bOfAUsTotalMonthlyReturn[which(bOfAUsTotalMonthlyReturn$date >
+                                     sma1Switch$begin[x] &
+                                     bOfAUsTotalMonthlyReturn$date <
+                                     sma1Switch$end[x]),]$monthly.returns
+  sma1Returns[which(sma1Returns$date > sma1Switch$begin[x] &
+                  sma1Returns$date < sma1Switch$end[x]),]$index <-
+    bOfAUsTotalMonthlyReturn$index[1]
+}
+sma1Returns$portfolio <- "sma1"
+  
+sma1Growth <- sma1Returns %>%
+  tq_portfolio(assets_col = portfolio,
+               returns_col = monthly.returns,
+               col_rename = "investment.growth",
+               wealth.index = TRUE)
+sma1Growth$portfolio <- "SMA 200 against price"
+
+# Calculate annualized return
+sma1AnnualizedReturn <- sma1Returns %>%
+  tq_performance(Ra = monthly.returns,
+                 Rb = NULL,
+                 performance_fun = Return.annualized)
+
+# Construct a data frame of returns for SMA 2 strategy (i.e., compare
+# smoothed price to 200 SMA)
+sma2Returns <- baselineReturns
+
+for(x in 1:nrow(sma2Switch)){
+  sma2Returns[which(sma2Returns$date > sma2Switch$begin[x] &
+                sma2Returns$date < sma2Switch$end[x]),]$monthly.returns <-
+    bOfAUsTotalMonthlyReturn[which(bOfAUsTotalMonthlyReturn$date >
+                                     sma2Switch$begin[x] &
+                                     bOfAUsTotalMonthlyReturn$date <
+                                     sma2Switch$end[x]),]$monthly.returns
+  sma2Returns[which(sma2Returns$date > sma2Switch$begin[x] &
+                  sma2Returns$date < sma2Switch$end[x]),]$index <-
+    bOfAUsTotalMonthlyReturn$index[1]
+}
+sma2Returns$portfolio <- "sma2"
+  
+sma2Growth <- sma2Returns %>%
+  tq_portfolio(assets_col = portfolio,
+               returns_col = monthly.returns,
+               col_rename = "investment.growth",
+               wealth.index = TRUE)
+sma2Growth$portfolio <- "SMA 200 against SMA 25"
+smaGrowth <- rbind(sma1Growth, sma2Growth)
+rm(sma1Growth, sma2Growth)
+```
+
+
+To evaluate the use of the Simple Moving Average method the crossover dates are used as the reallocation dates as explained in Section \@ref(downturns). The growth of both methods are shown in Figure \@ref(fig:plotSmaGrowth). Both methods show greater growth than any of the recession model runs shown in Figure \@ref(fig:plotModelGrowth). The method that uses the 200 day Simple Moving Average and the price outperforms the method that uses the 200 day Simple Moving Average and the 25 day Simple Moving Average. This is the simplest method explored and yet gives the highest growth. The annualized return for the 200 SMA for this period is `r round(sma1AnnualizedReturn$AnnualizedReturn*100,3)`% while the baseline return is `r round(baselineAnnualizedReturn$AnnualizedReturn*100,3)`%.
+
+
+```{r plotSmaGrowth, fig.asp=0.5, fig.cap="Simple Moving Average method yields impressive returns and is much easier to implement than the recession models."}
+ggplot(smaGrowth) +
+  geom_line(aes(x = date, y = investment.growth, color = portfolio)) +
+  geom_line(data = baselineGrowth,
+            aes(x = date, y = investment.growth), color = "red") +
+  geom_rect(data = recessions[recessions$begin >= baselineGrowth$date[1],],
+            aes(xmin = begin, xmax = end, ymin = -Inf, ymax = Inf),
+            alpha = 0.2) +
+  theme_tq() +
+  scale_color_manual(values = c("chartreuse", "Blue"))
+```
+
+
+
+
